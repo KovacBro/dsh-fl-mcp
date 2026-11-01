@@ -1,0 +1,5 @@
+# 运行时只需要 pillow（截屏、导入后的画面校验用）
+pillow>=10.0
+
+# 可选：只有 tools/doctor.py 读 .yml 形式的客户端配置时才需要
+pyyaml>=6.0

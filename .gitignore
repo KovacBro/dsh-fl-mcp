@@ -1,0 +1,19 @@
+# 虚拟环境（含 43MB 的 Python 与 pillow，不进仓库）
+.venv/
+venv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 运行时产物（缓存的编曲结果、导出回读用的临时 MIDI）
+*.log
+.fl_cache/
+*.tmp
+
+# 系统垃圾
+.DS_Store
+Thumbs.db
+desktop.ini

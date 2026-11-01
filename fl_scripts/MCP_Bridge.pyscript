@@ -1,0 +1,158 @@
+# -*- coding: utf-8 -*-
+# =====================================================================
+#  MCP_Bridge.pyscript —— FL Studio 26 钢琴卷帘桥接脚本
+#
+#  作用：让 FL Studio 能接受外部（MCP / AI）写来的音符。
+#  FL 的脚本沙箱不允许联网、也不给外部进程留 IPC 口，
+#  所以走最原始也最稳的方式：文件队列 + 官方快捷键重跑脚本。
+#
+#  队列文件（外部写入）：  mcp_queue.json
+#  状态文件（本脚本写出）： mcp_state.json
+#
+#  首次使用：Tools 菜单 -> Scripts -> MCP_Bridge 跑一次（没有对话框，静默执行）。
+#  之后：外部发 Ctrl+Alt+Y（官方 Run last script again）即可重复应用队列。
+#
+#  注意：本脚本只在「当前打开的钢琴卷帘」上工作，一次处理一个声部。
+# =====================================================================
+
+from flpianoroll import *
+import json
+import os
+import time
+
+QUEUE = r"__QUEUE_PATH__"
+STATE = r"__STATE_PATH__"
+
+
+def _load_queue():
+    try:
+        with open(QUEUE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _write_text(path, text):
+    """直接写目标文件。
+
+    注意：不要用「写 .tmp 再 os.replace」的原子写法——FL 的 Python 沙箱里
+    open() 能写，但 os.replace 会被 Windows 拒掉（目标文件句柄被宿主持有），
+    结果就是写了 .tmp、原文件不动，外部永远看不到回执。这是实测踩出来的坑。
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return True
+    except Exception:
+        pass
+    try:
+        with open(path, "w") as f:
+            f.write(text)
+        return True
+    except Exception:
+        return False
+
+
+def _save_queue(data):
+    _write_text(QUEUE, json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def _save_state(data):
+    _write_text(STATE, json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def _new_note():
+    """拿一个空白音符。优先用官方 clone()，退路是默认属性副本。"""
+    try:
+        return score.getDefaultNoteProperties().clone()
+    except Exception:
+        pass
+    try:
+        return Note()
+    except Exception:
+        return score.getDefaultNoteProperties()
+
+
+def _dump_score(extra=None):
+    """把当前钢琴卷帘导回给外部，便于 AI 看到真实状态。"""
+    ppq = float(score.PPQ) or 96.0
+    notes = []
+    try:
+        for i in range(score.noteCount):
+            n = score.getNote(i)
+            notes.append({
+                "number": int(n.number),
+                "time": round(float(n.time) / ppq, 4),
+                "length": round(float(n.length) / ppq, 4),
+                "velocity": int(round(float(n.velocity) * 127)),
+                "color": int(getattr(n, "color", 0)),
+                "muted": bool(getattr(n, "muted", False)),
+            })
+    except Exception as exc:
+        notes = [{"error": str(exc)}]
+    out = {"ok": True, "ppq": int(ppq), "noteCount": int(score.noteCount), "notes": notes,
+           "tsnum": int(getattr(score, "tsnum", 4)), "tsden": int(getattr(score, "tsden", 4)),
+           "stamp": time.time()}
+    if extra:
+        out.update(extra)
+    return out
+
+
+def main():
+    ppq = float(score.PPQ) or 96.0
+    q = _load_queue()
+    if not q:
+        _save_state(_dump_score({"status": "no-queue"}))
+        return
+
+    # 已消费过的队列不重复应用（否则每次重跑都会叠一层音符）
+    if q.get("status") != "pending":
+        _save_state(_dump_score({"status": "idle", "job": q.get("job")}))
+        return
+
+    job = q.get("job")
+    applied = 0
+    err = None
+    try:
+        for op in q.get("ops", []):
+            kind = op.get("type")
+            if kind == "clear":
+                score.clearNotes(True)
+            elif kind == "notes":
+                for d in op.get("notes", []):
+                    n = _new_note()
+                    n.number = int(d["number"])
+                    n.time = int(round(float(d.get("time", 0.0)) * ppq))
+                    n.length = max(1, int(round(float(d.get("length", 1.0)) * ppq)))
+                    n.velocity = max(0.0, min(1.0, float(d.get("velocity", 96)) / 127.0))
+                    n.color = int(d.get("color", 0)) % 16
+                    if d.get("pitchofs"):
+                        n.pitchofs = int(d["pitchofs"])
+                    if d.get("slide"):
+                        n.slide = True
+                    if d.get("porta"):
+                        n.porta = True
+                    if d.get("release"):
+                        n.release = float(d["release"])
+                    score.addNote(n)
+                    applied += 1
+            elif kind == "markers":
+                for m in op.get("markers", []):
+                    try:
+                        mk = Marker()
+                        mk.time = int(round(float(m.get("time", 0.0)) * ppq))
+                        mk.name = str(m.get("name", ""))
+                        score.addMarker(mk)
+                    except Exception:
+                        pass
+    except Exception as exc:
+        err = "%s: %s" % (type(exc).__name__, exc)
+
+    q["status"] = "error" if err else "done"
+    q["applied"] = applied
+    _save_queue(q)
+    _save_state(_dump_score({"job": job, "status": q["status"],
+                             "applied": applied, "error": err}))
+
+
+main()
